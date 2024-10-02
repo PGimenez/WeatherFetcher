@@ -7,7 +7,7 @@ from retry_requests import retry
 from datetime import datetime, timedelta
 
 # Setup the Open-Meteo API client with cache and retry on error
-cache_session = requests_cache.CachedSession('.cache', expire_after=-1)
+cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
 retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
 openmeteo = openmeteo_requests.Client(session=retry_session)
 
@@ -37,91 +37,91 @@ weather_variables = [
     "soil_moisture_100_to_255cm"
 ]
 
-# Get today's date
-today = datetime.utcnow().date()
-
-# Create a data directory if it doesn't exist
-if not os.path.exists('data'):
-    os.makedirs('data')
-
-# Loop over each city
-for city in cities:
-    city_name = city['name']
-    latitude = city['latitude']
-    longitude = city['longitude']
-    print(f"Processing city: {city_name}")
-
-    # Define the CSV file path for this city
-    csv_file = f"data/{city_name.replace(' ', '_')}.csv"
-
-    # Determine the start date
-    if os.path.exists(csv_file):
-        # If data exists, read the last date
-        existing_data = pd.read_csv(csv_file, parse_dates=['date'])
-        if existing_data.empty:
-            start_date = datetime(2024, 1, 1).date()
-        else:
-            last_date = existing_data['date'].max().date()
-            start_date = last_date + timedelta(days=1)
-    else:
-        # No existing data, start from Jan 1, 2024
-        start_date = datetime(2024, 1, 1).date()
-
-    # If start_date is after today, no need to fetch data
-    if start_date > today:
-        print(f"No new data to fetch for {city_name}.")
-        continue
-
-    # Prepare the parameters for the API call
-    url = "https://archive-api.open-meteo.com/v1/archive"
-    params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "start_date": start_date.strftime('%Y-%m-%d'),
-        "end_date": today.strftime('%Y-%m-%d'),
-        "hourly": weather_variables,
-        "timezone": "UTC"
-    }
-
+def fetch_and_process_data(url, params, city_name):
     try:
-        # Fetch the data
         response = openmeteo.weather_api(url, params=params)[0]
+        hourly = response.Hourly()
+        
+        hourly_data = {
+            "date": pd.date_range(
+                start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
+                end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
+                freq=pd.Timedelta(seconds=hourly.Interval()),
+                inclusive="left"
+            )
+        }
+        
+        for idx, var_name in enumerate(weather_variables):
+            hourly_data[var_name] = hourly.Variables(idx).ValuesAsNumpy()
+        
+        return pd.DataFrame(data=hourly_data)
     except Exception as e:
         print(f"Error fetching data for {city_name}: {e}")
-        continue
+        return None
 
-    # Process the hourly data
-    hourly = response.Hourly()
-
-    # Create a dictionary to hold the data
-    hourly_data = {"date": pd.date_range(
-        start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
-        end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
-        freq=pd.Timedelta(seconds=hourly.Interval()),
-        inclusive="left"
-    )}
-
-    # Add each variable to the data dictionary
-    for idx, var_name in enumerate(weather_variables):
-        hourly_data[var_name] = hourly.Variables(idx).ValuesAsNumpy()
-
-    # Create a DataFrame
-    new_data = pd.DataFrame(data=hourly_data)
-
-    # If data already exists, append new data
+def update_csv(new_data, csv_file):
     if os.path.exists(csv_file):
         existing_data = pd.read_csv(csv_file, parse_dates=['date'])
         combined_data = pd.concat([existing_data, new_data], ignore_index=True)
-        # Remove duplicates
         combined_data.drop_duplicates(subset='date', inplace=True)
         combined_data.sort_values('date', inplace=True)
         combined_data.reset_index(drop=True, inplace=True)
     else:
         combined_data = new_data
-
-    # Save the combined data to CSV
+    
     combined_data.to_csv(csv_file, index=False)
 
-    print(f"Data for {city_name} updated successfully.")
+def process_city(city, fetch_archive=True):
+    city_name = city['name']
+    csv_file = f"data/{city_name.replace(' ', '_')}.csv"
+    
+    if fetch_archive:
+        today = datetime.now().date()
+        if os.path.exists(csv_file):
+            existing_data = pd.read_csv(csv_file, parse_dates=['date'])
+            start_date = existing_data['date'].max().date() + timedelta(days=1)
+        else:
+            start_date = today - timedelta(days=30)  # Default to fetching last 30 days if no existing data
+        
+        if (today - start_date).days < 2:
+            print(f"Skipping archive data fetch for {city_name} as start date is within last 48 hours.")
+            return
 
-print("All cities processed.")
+        params = {
+            "latitude": city['latitude'],
+            "longitude": city['longitude'],
+            "start_date": start_date.strftime('%Y-%m-%d'),
+            "end_date": (today - timedelta(days=2)).strftime('%Y-%m-%d'),
+            "hourly": weather_variables,
+            "timezone": "UTC"
+        }
+        url = "https://archive-api.open-meteo.com/v1/archive"
+    else:
+        params = {
+            "latitude": city['latitude'],
+            "longitude": city['longitude'],
+            "hourly": weather_variables,
+            "timezone": "UTC",
+            "past_days": 2,
+            "forecast_days": 0
+        }
+        url = "https://api.open-meteo.com/v1/forecast"
+
+    new_data = fetch_and_process_data(url, params, city_name)
+    if new_data is not None:
+        update_csv(new_data, csv_file)
+        print(f"Data for {city_name} updated successfully.")
+
+# Main execution
+if not os.path.exists('data'):
+    os.makedirs('data')
+
+for city in cities:
+    process_city(city, fetch_archive=True)
+
+print("All cities processed for archive data.")
+
+for city in cities:
+    process_city(city, fetch_archive=False)
+
+print("All cities processed with last 48 hours data.")
