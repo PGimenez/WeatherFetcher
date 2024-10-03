@@ -62,12 +62,29 @@ def fetch_and_process_data(url, params, city_name):
 def update_csv(new_data, csv_file):
     if os.path.exists(csv_file):
         existing_data = pd.read_csv(csv_file, parse_dates=['date'])
+        latest_existing_date = existing_data['date'].max()
+        print(f"  Latest existing data: {latest_existing_date}")
+        
+        new_data_start = new_data['date'].min()
+        new_data_end = new_data['date'].max()
+        print(f"  New data range: {new_data_start} to {new_data_end}")
+        
         combined_data = pd.concat([existing_data, new_data], ignore_index=True)
+        new_rows = len(combined_data) - len(existing_data)
         combined_data.drop_duplicates(subset='date', inplace=True)
         combined_data.sort_values('date', inplace=True)
         combined_data.reset_index(drop=True, inplace=True)
+        deduped_rows = new_rows - (len(combined_data) - len(existing_data))
+        print(f"  Added {new_rows} new rows, {deduped_rows} were duplicates.")
+        
+        if new_rows == deduped_rows:
+            print("  WARNING: All new rows were duplicates. No new data added.")
+        else:
+            print(f"  New latest data: {combined_data['date'].max()}")
     else:
         combined_data = new_data
+        print(f"  Created new file with {len(combined_data)} rows.")
+        print(f"  Data range: {combined_data['date'].min()} to {combined_data['date'].max()}")
     
     combined_data.to_csv(csv_file, index=False)
 
@@ -102,15 +119,17 @@ def process_city(city, fetch_archive=True):
             "longitude": city['longitude'],
             "hourly": weather_variables,
             "timezone": "UTC",
-            "past_days": 2,
-            "forecast_days": 0
+            "past_hours": 24,
+            "forecast_hours": 1
         }
         url = "https://api.open-meteo.com/v1/forecast"
 
     new_data = fetch_and_process_data(url, params, city_name)
     if new_data is not None:
+        print(f"Updating data for {city_name}:")
         update_csv(new_data, csv_file)
         print(f"Data for {city_name} updated successfully.")
+    print()  # Add a blank line for better readability
 
 # Main execution
 if not os.path.exists('data'):
